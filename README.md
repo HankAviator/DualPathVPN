@@ -13,8 +13,8 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
 
 1. watches for simultaneously validated Wi-Fi and cellular networks;
 2. advertises both networks as underlays of the VPN;
-3. keeps startup and low-rate connections on Wi-Fi, then distributes new
-   sockets across Wi-Fi and cellular during connection bursts; and
+3. keeps low-rate connections on Wi-Fi, then distributes new sockets across
+   Wi-Fi and cellular during connection bursts; and
 4. leaves the VPN app's normal routing untouched whenever fewer than two
    usable links are available.
 
@@ -68,9 +68,8 @@ both physical interfaces with `tcpdump`.
   connections can use both links concurrently, but one TCP connection is not
   split across Wi-Fi and cellular.
 - Cellular boost starts when at least four sockets are protected within one
-  second, after a ten-second startup grace period. It remains available for
-  thirty seconds after the most recent connection burst. Boost expiry requires
-  no timer or wake lock.
+  second. It remains available for thirty seconds after the most recent
+  connection burst. Boost expiry requires no timer or wake lock.
 - Existing cellular-bound sockets remain on cellular until the VPN app closes
   them. The module cannot safely migrate or tear down sockets owned by the VPN
   app, so a persistent cellular socket can still keep the mobile radio active.

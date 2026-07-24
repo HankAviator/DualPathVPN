@@ -29,7 +29,6 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class DualPathHook implements IXposedHookLoadPackage {
     private static final String TAG = "[DualPathVPN] ";
     private static final long NETWORK_CACHE_MS = 1_000L;
-    private static final long STARTUP_GRACE_MS = 10_000L;
     private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
     private static final int CONNECTION_BURST_THRESHOLD = 4;
     private static final long CELLULAR_BOOST_MS = 30_000L;
@@ -42,7 +41,6 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static volatile PhysicalNetworks cachedNetworks = PhysicalNetworks.EMPTY;
     private static volatile long lastNetworkScan;
     private static volatile String processName = "unknown";
-    private static long firstProtectAt;
     private static long cellularBoostUntil;
 
     @Override
@@ -111,9 +109,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     }
 
     /**
-     * Keeps low-rate and startup connections on Wi-Fi, where VPN control and
-     * keepalive sockets are most likely to be created. A burst of protected
-     * sockets indicates a parallel workload that can benefit from both paths.
+     * Keeps low-rate connections on Wi-Fi, where VPN control and keepalive
+     * sockets are most likely to be created. A burst of protected sockets
+     * indicates a parallel workload that can benefit from both paths.
      *
      * <p>No timer or wake lock is needed: boost expiry is evaluated only when
      * the VPN protects another socket.
@@ -124,10 +122,6 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         boolean boosted;
 
         synchronized (RECENT_PROTECTS) {
-            if (firstProtectAt == 0L) {
-                firstProtectAt = now;
-            }
-
             RECENT_PROTECTS.addLast(now);
             long oldestAllowed = now - CONNECTION_BURST_WINDOW_MS;
             while (!RECENT_PROTECTS.isEmpty()
@@ -138,8 +132,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 RECENT_PROTECTS.removeFirst();
             }
 
-            if (now - firstProtectAt >= STARTUP_GRACE_MS
-                    && RECENT_PROTECTS.size() >= CONNECTION_BURST_THRESHOLD) {
+            if (RECENT_PROTECTS.size() >= CONNECTION_BURST_THRESHOLD) {
                 boostStarted = now >= cellularBoostUntil;
                 cellularBoostUntil = now + CELLULAR_BOOST_MS;
             }
