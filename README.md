@@ -18,6 +18,11 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
 4. leaves the VPN app's normal routing untouched whenever fewer than two
    usable links are available.
 
+All hook behavior is gated by Xiaomi/HyperOS's **Use mobile data to boost
+speed** switch (`Settings.System.linkturbo_is_enable`). When the switch is off
+or unavailable, the module does not scan physical networks, bind sockets, or
+replace the VPN's declared underlays.
+
 The module requests no Android permissions, contains no analytics, and has no
 network client of its own.
 
@@ -36,7 +41,8 @@ keep mobile data alive with:
 adb shell settings put global mobile_data_always_on 1
 ```
 
-On Xiaomi/HyperOS, also enable **Use mobile data to boost speed** in system settings.
+On Xiaomi/HyperOS, enable **Use mobile data to boost speed** in system settings.
+The module remains inactive while this switch is off.
 
 ## Installation
 
@@ -72,7 +78,8 @@ both physical interfaces with `tcpdump`.
   connection burst. Boost expiry requires no timer or wake lock.
 - Existing cellular-bound sockets remain on cellular until the VPN app closes
   them. The module cannot safely migrate or tear down sockets owned by the VPN
-  app, so a persistent cellular socket can still keep the mobile radio active.
+  app, so turn the switch off before connecting the VPN, or reconnect the VPN
+  after turning it off, to remove all prior module effects.
 - A VPN core that bypasses `VpnService.protect(int)`, or binds its socket to a
   network after calling `protect`, may not be compatible.
 - Both physical networks must have Android's `VALIDATED` capability and a

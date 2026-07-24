@@ -1,15 +1,20 @@
 package io.github.hankaviator.dualpathvpn;
 
 import android.annotation.SuppressLint;
+import android.content.ContentResolver;
 import android.content.Context;
+import android.database.ContentObserver;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.RouteInfo;
 import android.net.VpnService;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.provider.Settings;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
@@ -28,6 +33,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public final class DualPathHook implements IXposedHookLoadPackage {
     private static final String TAG = "[DualPathVPN] ";
+    private static final String LINK_TURBO_SETTING = "linkturbo_is_enable";
     private static final long NETWORK_CACHE_MS = 1_000L;
     private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
     private static final int CONNECTION_BURST_THRESHOLD = 4;
@@ -37,10 +43,14 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static final AtomicInteger NEXT_BOOST_NETWORK = new AtomicInteger();
     private static final AtomicInteger PROTECTED_SOCKET_COUNT = new AtomicInteger();
     private static final ArrayDeque<Long> RECENT_PROTECTS = new ArrayDeque<>();
+    private static final Object BOOST_SETTING_LOCK = new Object();
 
     private static volatile PhysicalNetworks cachedNetworks = PhysicalNetworks.EMPTY;
     private static volatile long lastNetworkScan;
     private static volatile String processName = "unknown";
+    private static volatile boolean boostSettingInitialized;
+    private static volatile boolean boostSettingEnabled;
+    private static ContentObserver boostSettingObserver;
     private static long cellularBoostUntil;
 
     @Override
@@ -70,6 +80,10 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                         }
 
                         VpnService service = (VpnService) param.thisObject;
+                        if (!isSystemBoostEnabled(service)) {
+                            return;
+                        }
+
                         PhysicalNetworks networks = getPhysicalNetworks(service, false);
 
                         // Do not interfere with the VPN's normal routing unless two
@@ -175,6 +189,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 if (context == null) {
                     return;
                 }
+                if (!isSystemBoostEnabled(context)) {
+                    return;
+                }
 
                 PhysicalNetworks networks = getPhysicalNetworks(context, false);
                 if (networks.hasBoth()) {
@@ -206,6 +223,68 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static boolean isSystemBoostEnabled(Context context) {
+        if (!boostSettingInitialized) {
+            initializeBoostSetting(context);
+        }
+        return boostSettingEnabled;
+    }
+
+    private static void initializeBoostSetting(Context context) {
+        synchronized (BOOST_SETTING_LOCK) {
+            if (boostSettingInitialized) {
+                return;
+            }
+
+            ContentResolver resolver = context.getContentResolver();
+            try {
+                boostSettingObserver = new ContentObserver(
+                        new Handler(Looper.getMainLooper())) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        updateBoostSetting(resolver);
+                    }
+                };
+                resolver.registerContentObserver(
+                        Settings.System.getUriFor(LINK_TURBO_SETTING),
+                        false,
+                        boostSettingObserver);
+                updateBoostSetting(resolver);
+            } catch (RuntimeException error) {
+                // Missing or inaccessible vendor settings must leave the module
+                // inactive rather than silently enabling dual-path behavior.
+                boostSettingEnabled = false;
+                log("cannot observe system boost setting; module inactive: " + error);
+            }
+            boostSettingInitialized = true;
+        }
+    }
+
+    private static void updateBoostSetting(ContentResolver resolver) {
+        boolean enabled = Settings.System.getInt(
+                resolver,
+                LINK_TURBO_SETTING,
+                0) == 1;
+        boolean wasEnabled = boostSettingEnabled;
+        boostSettingEnabled = enabled;
+        if (wasEnabled && !enabled) {
+            resetBoostPolicy();
+        }
+    }
+
+    private static void resetBoostPolicy() {
+        synchronized (RECENT_PROTECTS) {
+            RECENT_PROTECTS.clear();
+            cellularBoostUntil = 0L;
+        }
+        synchronized (DualPathHook.class) {
+            cachedNetworks = PhysicalNetworks.EMPTY;
+            lastNetworkScan = 0L;
+        }
+        NEXT_BOOST_NETWORK.set(0);
+        PROTECTED_SOCKET_COUNT.set(0);
     }
 
     @SuppressLint("MissingPermission")
