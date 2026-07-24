@@ -3,7 +3,7 @@
 DualPathVPN is an LSPosed module that distributes an Android VPN app's
 outbound connections across validated Wi-Fi and cellular networks.
 
-It was created to keep Xiaomi/HyperOS "Data acceleration" useful while an
+It was created to keep Xiaomi/HyperOS "Use mobile data to boost speed" useful while an
 Android `VpnService` is active, but the hook targets standard Android APIs and
 is not tied to Xiaomi or to a particular VPN app.
 
@@ -36,7 +36,7 @@ keep mobile data alive with:
 adb shell settings put global mobile_data_always_on 1
 ```
 
-On Xiaomi/HyperOS, also enable **Data acceleration** in system settings.
+On Xiaomi/HyperOS, also enable **Use mobile data to boost speed** in system settings.
 
 ## Installation
 
