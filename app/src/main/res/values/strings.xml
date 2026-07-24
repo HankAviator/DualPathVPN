@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">DualPathVPN</string>
+    <string name="module_description">Distributes Android VPN connections across Wi-Fi and cellular.</string>
+</resources>
