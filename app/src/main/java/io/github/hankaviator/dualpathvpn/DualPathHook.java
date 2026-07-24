@@ -12,6 +12,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -28,13 +29,21 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class DualPathHook implements IXposedHookLoadPackage {
     private static final String TAG = "[DualPathVPN] ";
     private static final long NETWORK_CACHE_MS = 1_000L;
+    private static final long STARTUP_GRACE_MS = 10_000L;
+    private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
+    private static final int CONNECTION_BURST_THRESHOLD = 4;
+    private static final long CELLULAR_BOOST_MS = 30_000L;
 
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean();
-    private static final AtomicInteger NEXT_NETWORK = new AtomicInteger();
+    private static final AtomicInteger NEXT_BOOST_NETWORK = new AtomicInteger();
+    private static final AtomicInteger PROTECTED_SOCKET_COUNT = new AtomicInteger();
+    private static final ArrayDeque<Long> RECENT_PROTECTS = new ArrayDeque<>();
 
     private static volatile PhysicalNetworks cachedNetworks = PhysicalNetworks.EMPTY;
     private static volatile long lastNetworkScan;
     private static volatile String processName = "unknown";
+    private static long firstProtectAt;
+    private static long cellularBoostUntil;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
@@ -71,11 +80,12 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                             return;
                         }
 
-                        int sequence = NEXT_NETWORK.getAndIncrement();
-                        Network target = networks.choose(sequence);
+                        NetworkSelection selection = selectNetwork(networks);
+                        Network target = selection.network;
                         int socketFd = (Integer) param.args[0];
                         if (bindSocket(target, socketFd)) {
-                            if (sequence < 8 || sequence % 50 == 49) {
+                            int socketCount = PROTECTED_SOCKET_COUNT.getAndIncrement();
+                            if (socketCount < 8 || socketCount % 50 == 49) {
                                 log("bound fd " + socketFd + " to "
                                         + networks.nameOf(target) + " (" + target + ")");
                             }
@@ -88,7 +98,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                         invalidateNetworkCache();
                         PhysicalNetworks refreshed = getPhysicalNetworks(service, true);
                         if (refreshed.hasBoth()) {
-                            Network fallback = refreshed.otherThan(target, sequence);
+                            Network fallback = selection.boosted
+                                    ? refreshed.otherThan(target)
+                                    : refreshed.wifi;
                             if (bindSocket(fallback, socketFd)) {
                                 log("recovered fd " + socketFd + " on "
                                         + refreshed.nameOf(fallback) + " (" + fallback + ")");
@@ -96,6 +108,54 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                         }
                     }
                 });
+    }
+
+    /**
+     * Keeps low-rate and startup connections on Wi-Fi, where VPN control and
+     * keepalive sockets are most likely to be created. A burst of protected
+     * sockets indicates a parallel workload that can benefit from both paths.
+     *
+     * <p>No timer or wake lock is needed: boost expiry is evaluated only when
+     * the VPN protects another socket.
+     */
+    private static NetworkSelection selectNetwork(PhysicalNetworks networks) {
+        long now = SystemClock.elapsedRealtime();
+        boolean boostStarted = false;
+        boolean boosted;
+
+        synchronized (RECENT_PROTECTS) {
+            if (firstProtectAt == 0L) {
+                firstProtectAt = now;
+            }
+
+            RECENT_PROTECTS.addLast(now);
+            long oldestAllowed = now - CONNECTION_BURST_WINDOW_MS;
+            while (!RECENT_PROTECTS.isEmpty()
+                    && RECENT_PROTECTS.peekFirst() < oldestAllowed) {
+                RECENT_PROTECTS.removeFirst();
+            }
+            while (RECENT_PROTECTS.size() > CONNECTION_BURST_THRESHOLD) {
+                RECENT_PROTECTS.removeFirst();
+            }
+
+            if (now - firstProtectAt >= STARTUP_GRACE_MS
+                    && RECENT_PROTECTS.size() >= CONNECTION_BURST_THRESHOLD) {
+                boostStarted = now >= cellularBoostUntil;
+                cellularBoostUntil = now + CELLULAR_BOOST_MS;
+            }
+            boosted = now < cellularBoostUntil;
+        }
+
+        if (boostStarted) {
+            log("cellular boost enabled for " + CELLULAR_BOOST_MS / 1_000L
+                    + "s after a connection burst");
+        }
+        if (!boosted) {
+            return new NetworkSelection(networks.wifi, false);
+        }
+
+        int sequence = NEXT_BOOST_NETWORK.getAndIncrement();
+        return new NetworkSelection(networks.chooseForBoost(sequence), true);
     }
 
     private static boolean bindSocket(Network network, int socketFd) {
@@ -239,18 +299,20 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             return wifi != null && cellular != null;
         }
 
-        Network choose(int sequence) {
-            return (sequence & 1) == 0 ? wifi : cellular;
+        Network chooseForBoost(int sequence) {
+            // Start each process with cellular so the burst that activates boost
+            // immediately uses the second path.
+            return (sequence & 1) == 0 ? cellular : wifi;
         }
 
-        Network otherThan(Network failed, int sequence) {
+        Network otherThan(Network failed) {
             if (failed != null && failed.equals(wifi)) {
                 return cellular;
             }
             if (failed != null && failed.equals(cellular)) {
                 return wifi;
             }
-            return choose(sequence + 1);
+            return wifi;
         }
 
         Network[] asArray() {
@@ -259,6 +321,16 @@ public final class DualPathHook implements IXposedHookLoadPackage {
 
         String nameOf(Network network) {
             return network != null && network.equals(wifi) ? "Wi-Fi" : "cellular";
+        }
+    }
+
+    private static final class NetworkSelection {
+        final Network network;
+        final boolean boosted;
+
+        NetworkSelection(Network network, boolean boosted) {
+            this.network = network;
+            this.boosted = boosted;
         }
     }
 }
