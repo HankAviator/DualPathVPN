@@ -1,6 +1,7 @@
 package io.github.hankaviator.dualpathvpn;
 
 import android.annotation.SuppressLint;
+import android.app.Application;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
@@ -25,6 +26,7 @@ import android.widget.TextView;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -67,6 +69,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static volatile boolean boostSettingInitialized;
     private static volatile boolean boostSettingEnabled;
     private static ContentObserver boostSettingObserver;
+    private static final ArrayList<XC_MethodHook.Unhook> vpnHooks = new ArrayList<>();
     private static long cellularBoostUntil;
 
     @Override
@@ -77,16 +80,20 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // LSPosed controls which packages load this module. Installing the hooks
-        // once per process makes this implementation work with any scoped VPN app.
+        // LSPosed controls which packages load this module. Application.attach
+        // gives us a Context before the VPN starts protecting sockets.
         if (!HOOKS_INSTALLED.compareAndSet(false, true)) {
             return;
         }
 
         processName = loadPackageParam.processName;
-        hookSocketProtection();
-        hookVpnUnderlays();
-        log("loaded in " + processName);
+        XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class,
+                new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                initializeBoostSetting((Context) param.args[0]);
+            }
+        });
     }
 
     private static void hookMobileBoostAppList(ClassLoader classLoader) {
@@ -108,7 +115,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             protected void afterHookedMethod(MethodHookParam param) {
                 Context context = (Context) param.thisObject;
                 updateBoostNote(context);
-                syncBoostApps(context);
+                if ((Boolean) XposedHelpers.callMethod(context, "isWifiLinkTurboEnabled")) {
+                    syncBoostApps(context);
+                }
             }
         });
         XposedHelpers.findAndHookMethod(screen, "enableWifiLinkTurbo", boolean.class,
@@ -172,6 +181,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             try {
                 PackageManager manager = appContext.getPackageManager();
                 XposedHelpers.callMethod(client, "checkServiceIsConnected");
+                Object slaManager = XposedHelpers.getObjectField(client, "mSlaManager");
                 String current = (String) XposedHelpers.callMethod(client,
                         "getLinkTurboWhiteList");
                 Set<String> enabled = new HashSet<>();
@@ -191,8 +201,10 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                     if (!enabled.add(uid)) {
                         continue;
                     }
-                    if (Boolean.TRUE.equals(XposedHelpers.callMethod(client,
-                            "addUidToLinkTurboWhiteList", app.uid))) {
+                    // We already checked the complete whitelist once, so call
+                    // the manager directly instead of re-fetching it per UID.
+                    if (Boolean.TRUE.equals(XposedHelpers.callMethod(slaManager,
+                            "addUidToLinkTurboWhiteList", uid))) {
                         added++;
                     } else {
                         enabled.remove(uid);
@@ -207,8 +219,8 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         }, "DualPathVPN-boost-app-sync").start();
     }
 
-    private static void hookSocketProtection() {
-        XposedHelpers.findAndHookMethod(
+    private static XC_MethodHook.Unhook hookSocketProtection() {
+        return XposedHelpers.findAndHookMethod(
                 VpnService.class,
                 "protect",
                 int.class,
@@ -220,7 +232,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                         }
 
                         VpnService service = (VpnService) param.thisObject;
-                        if (!isSystemBoostEnabled(service)) {
+                        if (!isSystemBoostEnabled()) {
                             return;
                         }
 
@@ -321,7 +333,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void hookVpnUnderlays() {
+    private static void hookVpnUnderlays(ArrayList<XC_MethodHook.Unhook> hooks) {
         XC_MethodHook replaceNetworks = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -329,7 +341,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 if (context == null) {
                     return;
                 }
-                if (!isSystemBoostEnabled(context)) {
+                if (!isSystemBoostEnabled()) {
                     return;
                 }
 
@@ -340,17 +352,17 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             }
         };
 
-        XposedHelpers.findAndHookMethod(
+        hooks.add(XposedHelpers.findAndHookMethod(
                 VpnService.class,
                 "setUnderlyingNetworks",
                 Network[].class,
-                replaceNetworks);
+                replaceNetworks));
 
-        XposedHelpers.findAndHookMethod(
+        hooks.add(XposedHelpers.findAndHookMethod(
                 VpnService.Builder.class,
                 "setUnderlyingNetworks",
                 Network[].class,
-                replaceNetworks);
+                replaceNetworks));
     }
 
     private static Context contextFrom(Object object) {
@@ -365,10 +377,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static boolean isSystemBoostEnabled(Context context) {
-        if (!boostSettingInitialized) {
-            initializeBoostSetting(context);
-        }
+    private static boolean isSystemBoostEnabled() {
         return boostSettingEnabled;
     }
 
@@ -403,15 +412,39 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     }
 
     private static void updateBoostSetting(ContentResolver resolver) {
-        boolean enabled = Settings.System.getInt(
-                resolver,
-                LINK_TURBO_SETTING,
-                0) == 1;
-        boolean wasEnabled = boostSettingEnabled;
-        boostSettingEnabled = enabled;
-        if (wasEnabled && !enabled) {
-            resetBoostPolicy();
+        synchronized (BOOST_SETTING_LOCK) {
+            boolean enabled;
+            try {
+                enabled = Settings.System.getInt(resolver, LINK_TURBO_SETTING, 0) == 1;
+            } catch (RuntimeException error) {
+                log("cannot read system boost setting: " + error);
+                enabled = false;
+            }
+            if (enabled && vpnHooks.isEmpty()) {
+                try {
+                    vpnHooks.add(hookSocketProtection());
+                    hookVpnUnderlays(vpnHooks);
+                    boostSettingEnabled = true;
+                    log("VPN hooks enabled");
+                } catch (Throwable error) {
+                    boostSettingEnabled = false;
+                    removeVpnHooks();
+                    log("cannot install VPN hooks: " + error);
+                }
+            } else if (!enabled && !vpnHooks.isEmpty()) {
+                boostSettingEnabled = false;
+                removeVpnHooks();
+                resetBoostPolicy();
+                log("VPN hooks disabled");
+            }
         }
+    }
+
+    private static void removeVpnHooks() {
+        for (XC_MethodHook.Unhook hook : vpnHooks) {
+            hook.unhook();
+        }
+        vpnHooks.clear();
     }
 
     private static void resetBoostPolicy() {

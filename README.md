@@ -26,9 +26,10 @@ or disconnected. It does not enable the speed-boost switch.
 
 VPN routing behavior is gated by Xiaomi/HyperOS's **Use mobile data to boost
 speed** switch (`Settings.System.linkturbo_is_enable`). When the switch is off
-or unavailable, the module does not scan physical networks, bind sockets, or
-replace the VPN's declared underlays. The Settings whitelist sync does not
-depend on VPN state.
+or unavailable, the module removes its VPN socket and underlay hooks. One
+settings observer remains to detect when the switch is turned on again. The
+Settings whitelist sync does not depend on VPN state and runs only while the
+speed-boost switch is on.
 
 The module requests no Android permissions, contains no analytics, and has no
 network client of its own.
@@ -87,6 +88,9 @@ both physical interfaces with `tcpdump`.
 - Cellular boost starts when at least four sockets are protected within one
   second. It remains available for thirty seconds after the most recent
   connection burst. Boost expiry requires no timer or wake lock.
+- While enabled, physical networks are scanned at most once per second under
+  normal operation. Each successfully protected VPN socket may require one
+  extra socket bind. While disabled, there is no per-socket module hook work.
 - Existing cellular-bound sockets remain on cellular until the VPN app closes
   them. The module cannot safely migrate or tear down sockets owned by the VPN
   app, so turn the switch off before connecting the VPN, or reconnect the VPN
