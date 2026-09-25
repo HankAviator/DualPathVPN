@@ -18,10 +18,17 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
 4. leaves the VPN app's normal routing untouched whenever fewer than two
    usable links are available.
 
-All hook behavior is gated by Xiaomi/HyperOS's **Use mobile data to boost
+In HyperOS Settings, the module replaces the **Use mobile data to boost speed**
+app list with the note “All apps are benefitting from data boost, no matter VPN
+on or off”. On opening that screen, it adds installed apps with internet
+permission to HyperOS's boost whitelist. This runs whether a VPN is connected
+or disconnected. It does not enable the speed-boost switch.
+
+VPN routing behavior is gated by Xiaomi/HyperOS's **Use mobile data to boost
 speed** switch (`Settings.System.linkturbo_is_enable`). When the switch is off
 or unavailable, the module does not scan physical networks, bind sockets, or
-replace the VPN's declared underlays.
+replace the VPN's declared underlays. The Settings whitelist sync does not
+depend on VPN state.
 
 The module requests no Android permissions, contains no analytics, and has no
 network client of its own.
@@ -42,17 +49,21 @@ adb shell settings put global mobile_data_always_on 1
 ```
 
 On Xiaomi/HyperOS, enable **Use mobile data to boost speed** in system settings.
-The module remains inactive while this switch is off.
+VPN routing remains inactive while this switch is off. The Settings screen can
+still populate the app whitelist while the switch is off.
 
 ## Installation
 
 1. Build or download the APK and install it.
 2. Open LSPosed and enable **DualPathVPN**.
-3. In the module scope, select only the VPN app(s) you want to modify.
-4. Force-stop and restart each selected VPN app, then reconnect its VPN.
+3. In the module scope, select **Settings** (`com.android.settings`) and the
+   VPN app(s) you want to modify.
+4. Force-stop and restart Settings and each selected VPN app, then reconnect
+   the VPN if needed.
 
-Exclave (`com.github.dyhkwong.sagernet`) is the default scope because it is the
-first verified implementation. Other VPN apps must be selected manually.
+Settings and Exclave (`com.github.dyhkwong.sagernet`) are in the default scope.
+Exclave is the first verified VPN implementation. Other VPN apps must be
+selected manually.
 
 ## Verification
 
@@ -84,7 +95,12 @@ both physical interfaces with `tcpdump`.
   network after calling `protect`, may not be compatible.
 - Both physical networks must have Android's `VALIDATED` capability and a
   default route.
-- Selecting non-VPN apps in LSPosed provides no benefit. Keep the scope narrow.
+- HyperOS disables its native boost service while a VPN is connected. With a
+  VPN, the module can use both links only through compatible VPN apps' protected
+  sockets. The note describes the selected policy, not a guarantee that every
+  app or connection receives a speed increase.
+- Scope Settings for the HyperOS app-list override; scope only the VPN apps
+  whose routing you want to modify.
 - Carrier data usage and battery consumption can increase.
 
 ### Verified setup

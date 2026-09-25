@@ -3,6 +3,8 @@ package io.github.hankaviator.dualpathvpn;
 import android.annotation.SuppressLint;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
@@ -15,9 +17,16 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.TextView;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -34,12 +43,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class DualPathHook implements IXposedHookLoadPackage {
     private static final String TAG = "[DualPathVPN] ";
     private static final String LINK_TURBO_SETTING = "linkturbo_is_enable";
+    private static final String SETTINGS_PACKAGE = "com.android.settings";
+    private static final String LINK_TURBO_SCREEN =
+            "com.android.settings.wifi.linkturbo.WifiLinkTurboSettings";
+    private static final String BOOST_NOTE_TAG = "dualpathvpn.mobile_boost_note";
+    private static final String BOOST_NOTE =
+            "All apps are benefitting from data boost, no matter VPN on or off";
     private static final long NETWORK_CACHE_MS = 1_000L;
     private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
     private static final int CONNECTION_BURST_THRESHOLD = 4;
     private static final long CELLULAR_BOOST_MS = 30_000L;
 
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean();
+    private static final AtomicBoolean APP_SYNC_RUNNING = new AtomicBoolean();
     private static final AtomicInteger NEXT_BOOST_NETWORK = new AtomicInteger();
     private static final AtomicInteger PROTECTED_SOCKET_COUNT = new AtomicInteger();
     private static final ArrayDeque<Long> RECENT_PROTECTS = new ArrayDeque<>();
@@ -55,6 +71,12 @@ public final class DualPathHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        if (SETTINGS_PACKAGE.equals(loadPackageParam.packageName)) {
+            processName = loadPackageParam.processName;
+            hookMobileBoostAppList(loadPackageParam.classLoader);
+            return;
+        }
+
         // LSPosed controls which packages load this module. Installing the hooks
         // once per process makes this implementation work with any scoped VPN app.
         if (!HOOKS_INSTALLED.compareAndSet(false, true)) {
@@ -65,6 +87,124 @@ public final class DualPathHook implements IXposedHookLoadPackage {
         hookSocketProtection();
         hookVpnUnderlays();
         log("loaded in " + processName);
+    }
+
+    private static void hookMobileBoostAppList(ClassLoader classLoader) {
+        Class<?> screen = XposedHelpers.findClassIfExists(LINK_TURBO_SCREEN, classLoader);
+        if (screen == null) {
+            log("HyperOS Mobile Speed Boost screen unavailable; hook skipped");
+            return;
+        }
+
+        XposedHelpers.findAndHookMethod(screen, "onCreate", android.os.Bundle.class,
+                new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                replaceBoostList((Context) param.thisObject);
+            }
+        });
+        XposedHelpers.findAndHookMethod(screen, "onResume", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Context context = (Context) param.thisObject;
+                updateBoostNote(context);
+                syncBoostApps(context);
+            }
+        });
+        XposedHelpers.findAndHookMethod(screen, "enableWifiLinkTurbo", boolean.class,
+                new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                Context context = (Context) param.thisObject;
+                updateBoostNote(context);
+                if ((Boolean) param.args[0]) {
+                    syncBoostApps(context);
+                }
+            }
+        });
+        XposedHelpers.findAndHookMethod(screen, "loadPackages", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                param.setResult(null);
+            }
+        });
+        log("HyperOS Mobile Speed Boost all-app override installed");
+    }
+
+    private static void replaceBoostList(Context context) {
+        View list = (View) XposedHelpers.getObjectField(context, "mAppRecyclerView");
+        if (!(list.getParent() instanceof ViewGroup)) {
+            return;
+        }
+        ViewGroup parent = (ViewGroup) list.getParent();
+        int index = parent.indexOfChild(list);
+        ViewGroup.LayoutParams params = list.getLayoutParams();
+        parent.removeView(list);
+
+        TextView note = new TextView(context);
+        note.setTag(BOOST_NOTE_TAG);
+        note.setText(BOOST_NOTE);
+        note.setTextAppearance(android.R.style.TextAppearance_Medium);
+        note.setGravity(Gravity.CENTER);
+        int padding = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 24,
+                context.getResources().getDisplayMetrics());
+        note.setPadding(padding, padding, padding, padding);
+        parent.addView(note, index, params);
+    }
+
+    private static void updateBoostNote(Context context) {
+        View note = ((android.app.Activity) context).getWindow().getDecorView()
+                .findViewWithTag(BOOST_NOTE_TAG);
+        if (note != null) {
+            boolean enabled = (Boolean) XposedHelpers.callMethod(context,
+                    "isWifiLinkTurboEnabled");
+            note.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private static void syncBoostApps(Context context) {
+        if (!APP_SYNC_RUNNING.compareAndSet(false, true)) {
+            return;
+        }
+        Object client = XposedHelpers.getObjectField(context, "mLinkTurboClient");
+        Context appContext = context.getApplicationContext();
+        new Thread(() -> {
+            try {
+                PackageManager manager = appContext.getPackageManager();
+                XposedHelpers.callMethod(client, "checkServiceIsConnected");
+                String current = (String) XposedHelpers.callMethod(client,
+                        "getLinkTurboWhiteList");
+                Set<String> enabled = new HashSet<>();
+                if (current != null) {
+                    for (String uid : current.split(",")) {
+                        enabled.add(uid);
+                    }
+                }
+                int added = 0;
+                for (ApplicationInfo app : manager.getInstalledApplications(0)) {
+                    if (app.uid < 10000 || manager.checkPermission(
+                            android.Manifest.permission.INTERNET, app.packageName)
+                            != PackageManager.PERMISSION_GRANTED) {
+                        continue;
+                    }
+                    String uid = Integer.toString(app.uid);
+                    if (!enabled.add(uid)) {
+                        continue;
+                    }
+                    if (Boolean.TRUE.equals(XposedHelpers.callMethod(client,
+                            "addUidToLinkTurboWhiteList", app.uid))) {
+                        added++;
+                    } else {
+                        enabled.remove(uid);
+                    }
+                }
+                log("enabled Mobile Speed Boost for " + added + " more app UIDs");
+            } catch (Throwable error) {
+                log("Mobile Speed Boost app sync failed: " + error);
+            } finally {
+                APP_SYNC_RUNNING.set(false);
+            }
+        }, "DualPathVPN-boost-app-sync").start();
     }
 
     private static void hookSocketProtection() {
