@@ -20,9 +20,11 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
 
 In HyperOS Settings, the module replaces the **Use mobile data to boost speed**
 app list with a note explaining that boost eligibility does not guarantee
-combined Wi-Fi and mobile speed. On opening that screen, it adds installed apps
-with internet permission to HyperOS's boost whitelist. This runs whether a VPN
-is connected or disconnected. It does not enable the speed-boost switch.
+combined Wi-Fi and mobile speed. On opening that screen, it prioritizes
+HyperOS's default apps and user-facing apps with internet permission in the
+boost whitelist. This runs whether a VPN is connected or disconnected. It does
+not enable the speed-boost switch. The phone's SLA daemon rejects oversized UID
+lists, so the module keeps the list below its limit; some apps may not fit.
 
 Without a VPN, HyperOS controls routing. The module only expands its app
 whitelist; it does not bind ordinary app sockets to Wi-Fi or cellular. Xiaomi

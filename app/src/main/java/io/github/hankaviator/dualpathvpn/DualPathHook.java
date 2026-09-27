@@ -4,8 +4,10 @@ import android.annotation.SuppressLint;
 import android.app.Application;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.database.ContentObserver;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
@@ -27,7 +29,11 @@ import android.widget.TextView;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,7 +56,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             "com.android.settings.wifi.linkturbo.WifiLinkTurboSettings";
     private static final String BOOST_NOTE_TAG = "dualpathvpn.mobile_boost_note";
     private static final String BOOST_NOTE =
-            "Internet apps are allowed to use mobile data boost. "
+            "User-facing apps are prioritized for mobile data boost. "
                     + "HyperOS decides when to use cellular, so Wi-Fi and mobile speeds "
                     + "will not necessarily add together. With a VPN, both links are used "
                     + "only when the VPN opens suitable connections.";
@@ -58,6 +64,8 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
     private static final int CONNECTION_BURST_THRESHOLD = 4;
     private static final long CELLULAR_BOOST_MS = 30_000L;
+    // The phone's SLA HAL rejects a roughly 1 KiB UID message. Leave room for its framing.
+    private static final int SLA_UID_LIST_MAX_BYTES = 960;
 
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean();
     private static final AtomicBoolean APP_SYNC_RUNNING = new AtomicBoolean();
@@ -140,7 +148,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 param.setResult(null);
             }
         });
-        log("HyperOS Mobile Speed Boost all-app override installed");
+        log("HyperOS Mobile Speed Boost app-list override installed");
     }
 
     private static void replaceBoostList(Context context) {
@@ -190,36 +198,111 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 Set<String> enabled = new HashSet<>();
                 if (current != null) {
                     for (String uid : current.split(",")) {
-                        enabled.add(uid);
+                        if (!uid.isEmpty()) {
+                            enabled.add(uid);
+                        }
                     }
+                }
+
+                Map<String, ApplicationInfo> apps = new HashMap<>();
+                Map<String, ApplicationInfo> appsByUid = new HashMap<>();
+                for (ApplicationInfo app : manager.getInstalledApplications(0)) {
+                    apps.put(app.packageName, app);
+                    appsByUid.put(Integer.toString(app.uid), app);
+                }
+                LinkedHashSet<String> candidates = new LinkedHashSet<>();
+                Object defaults = XposedHelpers.callMethod(client, "getLinkTurboDefaultPn");
+                if (defaults instanceof List) {
+                    for (Object name : (List<?>) defaults) {
+                        if (name instanceof String) {
+                            addBoostCandidate(candidates, apps.get(name), manager);
+                        }
+                    }
+                }
+                Intent launcher = new Intent(Intent.ACTION_MAIN);
+                launcher.addCategory(Intent.CATEGORY_LAUNCHER);
+                List<ResolveInfo> launchers = manager.queryIntentActivities(launcher, 0);
+                for (ResolveInfo activity : launchers) {
+                    ApplicationInfo app = apps.get(activity.activityInfo.packageName);
+                    if (app != null && (app.flags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                        addBoostCandidate(candidates, app, manager);
+                    }
+                }
+                for (String uid : enabled) {
+                    ApplicationInfo app = appsByUid.get(uid);
+                    if (app != null && (app.flags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                        addBoostCandidate(candidates, app, manager);
+                    }
+                }
+                for (ResolveInfo activity : launchers) {
+                    addBoostCandidate(candidates,
+                            apps.get(activity.activityInfo.packageName), manager);
+                }
+
+                Set<String> selected = new HashSet<>();
+                int bytes = 0;
+                for (String uid : candidates) {
+                    int length = uid.length() + 1; // getLinkTurboWhiteList adds a comma.
+                    if (bytes + length <= SLA_UID_LIST_MAX_BYTES) {
+                        selected.add(uid);
+                        bytes += length;
+                    }
+                }
+                if (selected.isEmpty()) {
+                    log("Mobile Speed Boost app sync skipped: no eligible apps");
+                    return;
+                }
+                int removed = 0;
+                for (String uid : new HashSet<>(enabled)) {
+                    if (!selected.contains(uid) && Boolean.TRUE.equals(XposedHelpers.callMethod(
+                            slaManager, "removeUidInLinkTurboWhiteList", uid))) {
+                        enabled.remove(uid);
+                        removed++;
+                    }
+                }
+                String pruned = (String) XposedHelpers.callMethod(client,
+                        "getLinkTurboWhiteList");
+                if (pruned == null || pruned.length() > SLA_UID_LIST_MAX_BYTES) {
+                    log("Mobile Speed Boost app sync could not shrink the UID list: "
+                            + (pruned == null ? "unavailable" : pruned.length() + " bytes"));
+                    return;
                 }
                 int added = 0;
-                for (ApplicationInfo app : manager.getInstalledApplications(0)) {
-                    if (app.uid < 10000 || manager.checkPermission(
-                            android.Manifest.permission.INTERNET, app.packageName)
-                            != PackageManager.PERMISSION_GRANTED) {
+                int remaining = SLA_UID_LIST_MAX_BYTES - pruned.length();
+                for (String uid : candidates) {
+                    if (!selected.contains(uid) || enabled.contains(uid)) {
                         continue;
                     }
-                    String uid = Integer.toString(app.uid);
-                    if (!enabled.add(uid)) {
+                    if (uid.length() + 1 > remaining) {
                         continue;
                     }
-                    // We already checked the complete whitelist once, so call
-                    // the manager directly instead of re-fetching it per UID.
                     if (Boolean.TRUE.equals(XposedHelpers.callMethod(slaManager,
                             "addUidToLinkTurboWhiteList", uid))) {
+                        enabled.add(uid);
                         added++;
-                    } else {
-                        enabled.remove(uid);
+                        remaining -= uid.length() + 1;
                     }
                 }
-                log("enabled Mobile Speed Boost for " + added + " more app UIDs");
+                String updated = (String) XposedHelpers.callMethod(client,
+                        "getLinkTurboWhiteList");
+                log("Mobile Speed Boost whitelist: " + selected.size() + " selected, "
+                        + added + " added, " + removed + " removed, "
+                        + (updated == null ? -1 : updated.length()) + " bytes");
             } catch (Throwable error) {
                 log("Mobile Speed Boost app sync failed: " + error);
             } finally {
                 APP_SYNC_RUNNING.set(false);
             }
         }, "DualPathVPN-boost-app-sync").start();
+    }
+
+    private static void addBoostCandidate(Set<String> candidates, ApplicationInfo app,
+            PackageManager manager) {
+        if (app != null && app.uid >= 10000 && manager.checkPermission(
+                android.Manifest.permission.INTERNET, app.packageName)
+                == PackageManager.PERMISSION_GRANTED) {
+            candidates.add(Integer.toString(app.uid));
+        }
     }
 
     private static XC_MethodHook.Unhook hookSocketProtection() {
