@@ -50,7 +50,10 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             "com.android.settings.wifi.linkturbo.WifiLinkTurboSettings";
     private static final String BOOST_NOTE_TAG = "dualpathvpn.mobile_boost_note";
     private static final String BOOST_NOTE =
-            "All apps are benefitting from data boost, no matter VPN on or off";
+            "Internet apps are allowed to use mobile data boost. "
+                    + "HyperOS decides when to use cellular, so Wi-Fi and mobile speeds "
+                    + "will not necessarily add together. With a VPN, both links are used "
+                    + "only when the VPN opens suitable connections.";
     private static final long NETWORK_CACHE_MS = 1_000L;
     private static final long CONNECTION_BURST_WINDOW_MS = 1_000L;
     private static final int CONNECTION_BURST_THRESHOLD = 4;

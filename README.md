@@ -19,10 +19,16 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
    usable links are available.
 
 In HyperOS Settings, the module replaces the **Use mobile data to boost speed**
-app list with the note “All apps are benefitting from data boost, no matter VPN
-on or off”. On opening that screen, it adds installed apps with internet
-permission to HyperOS's boost whitelist. This runs whether a VPN is connected
-or disconnected. It does not enable the speed-boost switch.
+app list with a note explaining that boost eligibility does not guarantee
+combined Wi-Fi and mobile speed. On opening that screen, it adds installed apps
+with internet permission to HyperOS's boost whitelist. This runs whether a VPN
+is connected or disconnected. It does not enable the speed-boost switch.
+
+Without a VPN, HyperOS controls routing. The module only expands its app
+whitelist; it does not bind ordinary app sockets to Wi-Fi or cellular. Xiaomi
+describes mobile data boost as using both links when Wi-Fi is poor, so a
+Speedtest on a good Wi-Fi connection may not use the cellular link at all.
+See [Xiaomi's network acceleration guide](https://www.mi.com/sa-en/support/faq/details/KA-503463/).
 
 VPN routing behavior is gated by Xiaomi/HyperOS's **Use mobile data to boost
 speed** switch (`Settings.System.linkturbo_is_enable`). When the switch is off
@@ -84,7 +90,8 @@ both physical interfaces with `tcpdump`.
 
 - This is per-connection load balancing, not true packet bonding. Multiple
   connections can use both links concurrently, but one TCP connection is not
-  split across Wi-Fi and cellular.
+  split across Wi-Fi and cellular. A single Speedtest result is not expected
+  to equal the sum of standalone Wi-Fi and cellular results.
 - Cellular boost starts when at least four sockets are protected within one
   second. It remains available for thirty seconds after the most recent
   connection burst. Boost expiry requires no timer or wake lock.
