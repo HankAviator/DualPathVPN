@@ -2,9 +2,12 @@ package io.github.hankaviator.dualpathvpn;
 
 import android.annotation.SuppressLint;
 import android.app.Application;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -29,6 +32,7 @@ import android.widget.TextView;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -56,7 +60,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
             "com.android.settings.wifi.linkturbo.WifiLinkTurboSettings";
     private static final String BOOST_NOTE_TAG = "dualpathvpn.mobile_boost_note";
     private static final String BOOST_NOTE =
-            "User-facing apps are prioritized for mobile data boost. "
+            "Recently used apps are prioritized for mobile data boost. "
                     + "HyperOS decides when to use cellular, so Wi-Fi and mobile speeds "
                     + "will not necessarily add together. With a VPN, both links are used "
                     + "only when the VPN opens suitable connections.";
@@ -66,6 +70,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static final long CELLULAR_BOOST_MS = 30_000L;
     // The phone's SLA HAL rejects a roughly 1 KiB UID message. Leave room for its framing.
     private static final int SLA_UID_LIST_MAX_BYTES = 960;
+    private static final long APP_RANKING_PERIOD_MS = 7L * 24 * 60 * 60 * 1_000L;
+    private static final String BOOST_PREFS = "dualpathvpn_mobile_boost";
+    private static final String LAST_APP_RANKING = "last_app_ranking";
 
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean();
     private static final AtomicBoolean APP_SYNC_RUNNING = new AtomicBoolean();
@@ -195,6 +202,15 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 Object slaManager = XposedHelpers.getObjectField(client, "mSlaManager");
                 String current = (String) XposedHelpers.callMethod(client,
                         "getLinkTurboWhiteList");
+                SharedPreferences prefs = appContext.getSharedPreferences(
+                        BOOST_PREFS, Context.MODE_PRIVATE);
+                long now = System.currentTimeMillis();
+                long lastRanking = prefs.getLong(LAST_APP_RANKING, 0L);
+                long age = now - lastRanking;
+                if (current != null && current.length() <= SLA_UID_LIST_MAX_BYTES
+                        && age >= 0 && age < APP_RANKING_PERIOD_MS) {
+                    return;
+                }
                 Set<String> enabled = new HashSet<>();
                 if (current != null) {
                     for (String uid : current.split(",")) {
@@ -211,6 +227,8 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                     appsByUid.put(Integer.toString(app.uid), app);
                 }
                 LinkedHashSet<String> candidates = new LinkedHashSet<>();
+                int recentApps = addRecentlyUsedApps(candidates, apps, manager,
+                        appContext, now);
                 Object defaults = XposedHelpers.callMethod(client, "getLinkTurboDefaultPn");
                 if (defaults instanceof List) {
                     for (Object name : (List<?>) defaults) {
@@ -285,7 +303,11 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 }
                 String updated = (String) XposedHelpers.callMethod(client,
                         "getLinkTurboWhiteList");
-                log("Mobile Speed Boost whitelist: " + selected.size() + " selected, "
+                if (updated != null && updated.length() <= SLA_UID_LIST_MAX_BYTES) {
+                    prefs.edit().putLong(LAST_APP_RANKING, now).apply();
+                }
+                log("Mobile Speed Boost whitelist: " + recentApps + " recently used, "
+                        + selected.size() + " selected, "
                         + added + " added, " + removed + " removed, "
                         + (updated == null ? -1 : updated.length()) + " bytes");
             } catch (Throwable error) {
@@ -303,6 +325,46 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 == PackageManager.PERMISSION_GRANTED) {
             candidates.add(Integer.toString(app.uid));
         }
+    }
+
+    private static int addRecentlyUsedApps(Set<String> candidates,
+            Map<String, ApplicationInfo> apps, PackageManager manager,
+            Context context, long now) {
+        UsageStatsManager usage = (UsageStatsManager) context.getSystemService(
+                Context.USAGE_STATS_SERVICE);
+        if (usage == null) {
+            return 0;
+        }
+        List<UsageStats> stats;
+        try {
+            stats = usage.queryUsageStats(UsageStatsManager.INTERVAL_DAILY,
+                    now - APP_RANKING_PERIOD_MS, now);
+        } catch (SecurityException error) {
+            log("Usage history unavailable: " + error);
+            return 0;
+        }
+        if (stats == null) {
+            return 0;
+        }
+        Map<String, Long> foregroundTime = new HashMap<>();
+        for (UsageStats stat : stats) {
+            long duration = stat.getTotalTimeInForeground();
+            if (duration > 0) {
+                String packageName = stat.getPackageName();
+                Long previous = foregroundTime.get(packageName);
+                foregroundTime.put(packageName,
+                        (previous == null ? 0L : previous) + duration);
+            }
+        }
+        List<String> ranked = new ArrayList<>(foregroundTime.keySet());
+        Collections.sort(ranked, (left, right) -> {
+            int order = Long.compare(foregroundTime.get(right), foregroundTime.get(left));
+            return order != 0 ? order : left.compareTo(right);
+        });
+        for (String packageName : ranked) {
+            addBoostCandidate(candidates, apps.get(packageName), manager);
+        }
+        return candidates.size();
     }
 
     private static XC_MethodHook.Unhook hookSocketProtection() {
