@@ -85,6 +85,7 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static volatile PhysicalNetworks cachedNetworks = PhysicalNetworks.EMPTY;
     private static volatile long lastNetworkScan;
     private static volatile String processName = "unknown";
+    private static volatile boolean frameworkProcess;
     private static volatile boolean boostSettingInitialized;
     private static volatile boolean boostSettingEnabled;
     private static ContentObserver boostSettingObserver;
@@ -94,8 +95,17 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         if ("android".equals(loadPackageParam.packageName)) {
-            processName = loadPackageParam.processName;
+            if (frameworkProcess) {
+                return;
+            }
+            frameworkProcess = true;
+            processName = "system_server";
             hookFrameworkSignalGate(loadPackageParam.classLoader);
+            return;
+        }
+        // System-server also reports later package/context loads, sometimes with null names.
+        // They must never install the VPN app hooks in the framework process.
+        if (frameworkProcess || loadPackageParam.packageName == null) {
             return;
         }
         if (SETTINGS_PACKAGE.equals(loadPackageParam.packageName)) {
