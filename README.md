@@ -19,8 +19,7 @@ For VPN apps selected in the module's LSPosed scope, DualPathVPN:
    usable links are available.
 
 In HyperOS Settings, the module replaces the **Use mobile data to boost speed**
-app list with a note explaining that boost eligibility does not guarantee
-combined Wi-Fi and mobile speed. It sorts all installed apps with internet
+app list with a concise note about boost priority. It sorts all installed apps with internet
 permission by their last recorded use, newest first, then fills the boost
 whitelist with as many app UIDs as the phone's SLA daemon accepts. Apps with no
 recorded use come last. The ranking refreshes when the screen is next opened
