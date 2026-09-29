@@ -44,6 +44,7 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import dalvik.system.BaseDexClassLoader;
 
 /**
  * Hooks Android's standard VpnService socket-protection path inside VPN apps
@@ -53,6 +54,8 @@ public final class DualPathHook implements IXposedHookLoadPackage {
     private static final String TAG = "[DualPathVPN] ";
     private static final String LINK_TURBO_SETTING = "linkturbo_is_enable";
     private static final String SETTINGS_PACKAGE = "com.android.settings";
+    private static final String STATUS_MANAGER = "com.xiaomi.NetworkBoost.StatusManager";
+    private static final String SLA_SERVICE = "com.xiaomi.NetworkBoost.slaservice.SLAService";
     private static final String LINK_TURBO_SCREEN =
             "com.android.settings.wifi.linkturbo.WifiLinkTurboSettings";
     private static final String BOOST_NOTE_TAG = "dualpathvpn.mobile_boost_note";
@@ -71,6 +74,9 @@ public final class DualPathHook implements IXposedHookLoadPackage {
 
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean();
     private static final AtomicBoolean APP_SYNC_RUNNING = new AtomicBoolean();
+    private static final AtomicBoolean SIGNAL_CALLBACK_HOOKED = new AtomicBoolean();
+    private static final AtomicBoolean SIGNAL_OVERRIDE_LOGGED = new AtomicBoolean();
+    private static final ArrayList<XC_MethodHook.Unhook> frameworkLoaderHooks = new ArrayList<>();
     private static final AtomicInteger NEXT_BOOST_NETWORK = new AtomicInteger();
     private static final AtomicInteger PROTECTED_SOCKET_COUNT = new AtomicInteger();
     private static final ArrayDeque<Long> RECENT_PROTECTS = new ArrayDeque<>();
@@ -87,6 +93,11 @@ public final class DualPathHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        if ("android".equals(loadPackageParam.packageName)) {
+            processName = loadPackageParam.processName;
+            hookFrameworkSignalGate(loadPackageParam.classLoader);
+            return;
+        }
         if (SETTINGS_PACKAGE.equals(loadPackageParam.packageName)) {
             processName = loadPackageParam.processName;
             hookMobileBoostAppList(loadPackageParam.classLoader);
@@ -107,6 +118,87 @@ public final class DualPathHook implements IXposedHookLoadPackage {
                 initializeBoostSetting((Context) param.args[0]);
             }
         });
+    }
+
+    private static void hookFrameworkSignalGate(ClassLoader loader) {
+        if (installSignalListenerHook(loader)) {
+            return;
+        }
+        // HyperOS loads NetworkBoost.jar separately during system-server startup.
+        // Watch loader creation, rather than intercepting every class load.
+        synchronized (frameworkLoaderHooks) {
+            frameworkLoaderHooks.addAll(XposedBridge.hookAllConstructors(
+                    BaseDexClassLoader.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    for (Object argument : param.args) {
+                        if (argument instanceof String
+                                && ((String) argument).contains("NetworkBoost")
+                                && installSignalListenerHook((ClassLoader) param.thisObject)) {
+                            synchronized (frameworkLoaderHooks) {
+                                for (XC_MethodHook.Unhook hook : frameworkLoaderHooks) {
+                                    hook.unhook();
+                                }
+                                frameworkLoaderHooks.clear();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }));
+        }
+    }
+
+    private static boolean installSignalListenerHook(ClassLoader loader) {
+        Class<?> manager = XposedHelpers.findClassIfExists(STATUS_MANAGER, loader);
+        if (manager == null) {
+            return false;
+        }
+        Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(manager,
+                "registerModemSignalStrengthListener", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                Object listener = param.args[0];
+                if (listener == null || !listener.getClass().getName().startsWith(SLA_SERVICE + "$")
+                        || SIGNAL_CALLBACK_HOOKED.get()) {
+                    return;
+                }
+                try {
+                    Class<?> service = XposedHelpers.findClass(SLA_SERVICE,
+                            listener.getClass().getClassLoader());
+                    XposedHelpers.findAndHookMethod(listener.getClass(),
+                            "isModemSingnalStrengthStatus", int.class, int.class,
+                            new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam signal) {
+                            if (!Integer.valueOf(1).equals(signal.args[0])) {
+                                return;
+                            }
+                            Context context = (Context) XposedHelpers.getStaticObjectField(
+                                    service, "mContext");
+                            if (context != null && Settings.System.getInt(
+                                    context.getContentResolver(), LINK_TURBO_SETTING, 0) == 1) {
+                                signal.args[0] = 0;
+                                if (SIGNAL_OVERRIDE_LOGGED.compareAndSet(false, true)) {
+                                    log("bypassed HyperOS weak-signal stop at " + signal.args[1]
+                                            + " dBm while Mobile Speed Boost is enabled");
+                                }
+                            }
+                        }
+                    });
+                    SIGNAL_CALLBACK_HOOKED.set(true);
+                    log("HyperOS SLA weak-signal callback override installed");
+                } catch (Throwable error) {
+                    log("HyperOS SLA signal override unavailable: " + error);
+                }
+            }
+        });
+        if (hooks.isEmpty()) {
+            log("HyperOS modem signal listener registration unavailable");
+            return false;
+        }
+        log("waiting for HyperOS SLA modem signal listener");
+        return true;
     }
 
     private static void hookMobileBoostAppList(ClassLoader classLoader) {

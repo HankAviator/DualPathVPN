@@ -27,6 +27,12 @@ recorded use come last. The ranking refreshes when the screen is next opened
 after seven days; no background polling is used. This works with VPN on or off
 and does not enable the speed-boost switch. Some apps may not fit simultaneously.
 
+With **System Framework** in its LSPosed scope, the module also bypasses
+HyperOS's weak-cellular-signal stop condition while Mobile Speed Boost is on.
+Thermal limits and network availability checks still apply. Using a weak
+cellular link can increase battery use or reduce throughput; the override
+does not strengthen the signal.
+
 Without a VPN, HyperOS controls routing. The module only expands its app
 whitelist; it does not bind ordinary app sockets to Wi-Fi or cellular. Xiaomi
 describes mobile data boost as using both links when Wi-Fi is poor, so a
@@ -66,12 +72,13 @@ still populate the app whitelist while the switch is off.
 
 1. Build or download the APK and install it.
 2. Open LSPosed and enable **DualPathVPN**.
-3. In the module scope, select **Settings** (`com.android.settings`) and the
-   VPN app(s) you want to modify.
-4. Force-stop and restart Settings and each selected VPN app, then reconnect
-   the VPN if needed.
+3. In the module scope, select **Settings** (`com.android.settings`),
+   **System Framework** (`android`), and the VPN app(s) you want to modify.
+4. Reboot to load the framework signal override. For later changes that affect
+   only Settings or VPN hooks, force-stop and restart those apps.
 
-Settings and Exclave (`com.github.dyhkwong.sagernet`) are in the default scope.
+System Framework, Settings, and Exclave (`com.github.dyhkwong.sagernet`) are in
+the recommended scope.
 Exclave is the first verified VPN implementation. Other VPN apps must be
 selected manually.
 
@@ -113,8 +120,8 @@ both physical interfaces with `tcpdump`.
   VPN, the module can use both links only through compatible VPN apps' protected
   sockets. The note describes the selected policy, not a guarantee that every
   app or connection receives a speed increase.
-- Scope Settings for the HyperOS app-list override; scope only the VPN apps
-  whose routing you want to modify.
+- Scope Settings for the HyperOS app-list override and System Framework for
+  the weak-signal override; scope the VPN apps whose routing you want to modify.
 - Carrier data usage and battery consumption can increase.
 
 ### Verified setup
